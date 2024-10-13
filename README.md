@@ -19,4 +19,4 @@ Time Series I and II:
 - Define a hierarchical time series structure for modeling.
 
 ## Resources
-(Dr. Aric LaBarr TS textbook)[https://www.ariclabarr.com/time-series/part_9_season.html]
+[Dr. Aric LaBarr TS textbook](https://www.ariclabarr.com/time-series/part_9_season.html)
