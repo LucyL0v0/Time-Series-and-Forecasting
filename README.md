@@ -1,4 +1,4 @@
-# Time-Series-and-Forecasting-I and II
+# Time-Series-and-Forecasting-II
 Seasonal ARIMA, dynamic regression model, prophet model, time series neural networks and more.
 
 ## Course Objectives
