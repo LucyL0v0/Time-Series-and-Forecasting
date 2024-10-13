@@ -1,0 +1,315 @@
+---
+title: "TS2_HW1"
+author: "Lucy Liu"
+date: "9/28/2024"
+output: html_document
+---
+Dr. Labarr Textbook for code book reference: https://www.ariclabarr.com/time-series/part_9_season.html
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(tsibble)
+library(lubridate)
+library(imputeTS)
+library(fpp3)
+```
+
+
+```{r}
+# first load in data
+train_energy = read.csv("D:/NCSU/MSA____6.2024-5.2025/Fall/Time Series and Forecasting II/TS2_HW1/hrl_load_metered.csv")
+test_energy_1 = read.csv("D:/NCSU/MSA____6.2024-5.2025/Fall/Time Series and Forecasting II/TS2_HW1/hrl_load_metered - test1.csv")
+
+```
+
+
+```{r}
+# get data variable to a tsibble object as index
+
+train_energy$datetime_beginning_ept <- as.POSIXct(train_energy$datetime_beginning_ept, 
+                                                           format = "%m/%d/%y %H:%M",
+                                                           tz = "America/New_York")
+test_energy_1$datetime_beginning_ept <- as.POSIXct(test_energy_1$datetime_beginning_ept, 
+                                                           format = "%m/%d/%y %H:%M",
+                                                           tz = "America/New_York")
+
+
+# will have to account for multiple 2:00am’s in the spring and a lost 2:00am in the fall. Feel free to impute these as you see fit
+
+# ----- Handling Fall Back (Duplicate 1:00 AM) -----
+# Group by time, and if there are duplicates, take the average
+train_energy <- train_energy %>%
+  group_by(datetime_beginning_ept) %>%
+  summarise(mw = mean(mw, na.rm = TRUE)) %>%
+  ungroup() # 6 less observation b/c nov duplicated 1am is now only 1 occurrence. 58721
+
+# 
+# create tsibble on train_energy
+train_energy_tsibble = train_energy %>%  as_tsibble(index = datetime_beginning_ept) # no missing value
+
+## fill gaps
+train_energy_tsibble_gapsfilled = fill_gaps(train_energy_tsibble,.full = TRUE) # 6 missing. Find which 6:
+print(train_energy_tsibble_gapsfilled %>% filter(is.na(mw)))
+
+# run ESM model (ARIMA) finding any NAs. later code chunk
+
+# ----- Handling Spring Forward (Missing 2:00 AM) -----
+# # Create a complete time sequence with 1-hour intervals
+# from the minimum to the maximum datetime in your data
+#full_time_sequence <- seq(
+#  from = min(train_energy$datetime_beginning_ept),
+#  to = max(train_energy$datetime_beginning_ept),
+#  by = "hour"
+#)
+
+# Merge your data with the full time sequence
+# This will insert NA for any missing hours, such as 02:00 AM during DST
+#complete_data <- data.frame(datetime_beginning_ept = full_time_sequence) %>%
+#  left_join(train_energy, by = "datetime_beginning_ept") # NA should be inserted here???
+
+# ----- Impute the missing 02:00 AM value (caused by DST) -----
+# Use linear interpolation to fill the missing value for the skipped hour
+train_energy_tsibble_gapsfilled$mw <- zoo::na.approx(train_energy_tsibble_gapsfilled$mw, na.rm = FALSE) # here fill the NA ...
+
+# Check the result to ensure 02:00 AM is imputed
+print(train_energy_tsibble_gapsfilled %>% filter(is.na(mw)))
+
+# turn train_energy to tsibble (needed??)
+#train_energy = train_energy %>% as_tsibble(index=datetime_beginning_ept)
+# Check the result to make sure the time series is regular
+train_energy_tsibble_gapsfilled %>% count_gaps()  # Should return 0 gaps now
+
+# How Dr. Labarr explains how day:
+
+# in march, R tsibble() knows it's spring daylight saving month so expecting a missing hour, so no problem with 1am, 3am, 4am etc.
+# tsibble() knows there's a extra hour in November. But when first put data in tsibble() form, it checks for duplicates/indeces. It can't have two 1ams. Tsibble() will flag them. It then realize it has gaps, so it puts back 1ams again, since it expect data to have two 1ams in the tsibble().
+```
+```{r}
+# visualize seasonality. S = 24 or annually season:
+dcmp <- train_energy_tsibble_gapsfilled %>%
+  model(stl = STL(mw))
+#components(dcmp)
+components(dcmp) %>% autoplot()
+```
+
+## Build ESM model as baseline --> let the computer to search for the best model
+```{r}
+energy_auto <- train_energy_tsibble_gapsfilled %>% model(ETS(mw))
+
+report(energy_auto) 
+# Time Series I: IN MONTHLY SCALE: Model suggested: ETS(M,N,A) --> Multiplicative Error, No trend, Additive Seasonality. With AICc 1020.935 confirms above lowest AICc
+
+# Time Series II: NOW IN HOUSELY SCALE: Model: ETS(A,Ad,N), with AICc of AICc is 1173768 and BIC is 1173822 
+```
+```{r}
+# Now compare computer suggested model ETS(M,N,A) with HW models (previously perform the bests):
+
+energy_fit <- train_energy_tsibble_gapsfilled %>%
+  model(
+    #HWAdd = ETS(average_monthly_mw ~ error("A") + trend("A") + season("A")),
+    #HWMult = ETS(average_monthly_mw ~ error("M") + trend("A") + season("M")),
+    AutoETS = ETS(mw ~ error("A") + trend("Ad") + season("N")) 
+  )
+        # Side note: Other than "M", "N", "A", can also be "Ad" = damped additive. --> which means the trend diminishes over time. Instead of continuing indefinitely at the same rate, the trend is "damped" or gradually reduces, eventually leveling off.
+        
+        # usefulness of damped additive trend: when you expect that the trend in the data will not continue at the same rate in the long run. It adds flexibility to the model by reducing the magnitude of the trend over time, making the long-term forecast more realistic.
+
+energy_fc <- energy_fit %>%
+  fabletools::forecast(h = 168) # should have same length with testset. Test set now has 168 rows
+
+
+fabletools::accuracy(energy_fc, bind_rows(train_energy_tsibble_gapsfilled,test_energy_1)) %>% arrange(MAPE) %>% select(.model: MAPE) #monthly_tsibble is whole dataset. change to validation dataset tsibble --> use validation dataset to run accuracy
+
+#report(energy_fit) %>% arrange(AICc) %>% select(.model, AIC, AICc, BIC) # This code shows AICc. Want lower AICc.
+```
+
+```{r}
+#create all the different models
+mw_fit <- train_energy_tsibble_gapsfilled  %>% 
+  model(
+    'SES' = ETS(mw ~ error("A") + trend("N") + season("N")),
+    'Linear' = ETS(mw ~ error("A") + trend("A") + season("N")),
+    "AutoETS" = ETS(mw ~ error("A") + trend("Ad") + season("N")), #'Damped Linear'
+    'Holt-Winters Additive' = ETS(mw ~ error("A") + trend("A") + season("A")),
+    'Holt-Winters Multiplicative' = ETS(mw ~ error("M") + trend("A") + season("M")),
+    'Holt-Winters Multiplicative Damped' = ETS(mw ~ error("M") + trend("Ad") + season("M"))
+  )
+
+#fc with above models
+mw_fc <- mw_fit  %>% 
+  fabletools::forecast(h = nrow(test_energy_1))
+
+report(mw_fit) %>% arrange(AICc) %>% select(.model, AIC, AICc, BIC) # This code shows AICc. Want lower AICc. Better use AICc to select model on training data.
+
+
+#see how well the different models did on the train + val data
+fabletools::accuracy(mw_fc, bind_rows(train_energy_tsibble_gapsfilled, test_energy_1)) %>% arrange(MAPE) %>% select(.model: MAPE)
+
+# ESM can pick model based on MAPE and MAE
+
+```
+
+Damped linear has the lowest AICc value on training data but Holt-Winters Multiplicative has the lowest MAPE value on validation dataset.
+=========================================================================================
+## Build seasonal ARIMA model 
+
+
+Deterministic path: seasonal dummy variables
+
+(if dummy coded weeks, then already dummy coded the days)
+(so if dummy coded months, then dummy coded the weeks???)
+```{r}
+############# FIRST TRY HOURLY LEVEL. ###############
+# Add an hour factor column to your data
+train_energy_tsibble_gapsfilled <- train_energy_tsibble_gapsfilled %>%
+  mutate(hour_of_day = factor(hour(datetime_beginning_ept)))
+
+# do same thing as test: mutate(hour_of_day = factor(hour(datetime_beginning_ept)))
+
+# Fit the ARIMA model with the seasonal dummy variables for hours
+model_SD_ARIMA <- train_energy_tsibble_gapsfilled %>%
+  model(ARIMA(mw ~ factor(hour_of_day) + PDQ(0,0,0))) #PDQ(D=0) runs through AR and MA terms
+    # D=0 refers specifically to the seasonal differencing component, meaning you're not differencing the data to make it stationary in the seasonal dimension.
+    # PDQ(0,0,0) refers to the entire seasonal component of the ARIMA model being turned off, implying that you're not using any seasonal autoregressive, differencing, or moving average components at all.
+    # If you specify PDQ(0,0,0), you're not modeling any seasonal effects, whereas if you only set D=0, you may still include seasonal autoregressive or moving average terms (P or Q could be non-zero).
+
+
+# Report the model summary
+report(model_SD_ARIMA)
+
+#suppose to run about 1 hour --> ARIMA(2,0,2)(2,1,0)[24]
+# waited for 25 min 20 seconds. Terminated by user.
+```
+```{r}
+########### TRY ANOTHER WAY MONTHLY LEVEL. ##############
+energy_month = train_energy_tsibble_gapsfilled %>% mutate(month=as.numeric(substr(datetime_beginning_ept, 6,7)))
+
+# since this created new column, do same thing to test data:
+
+# test_energy_1_month <- test_energy_1 %>% mutate(month = as.numeric(substr(datetime_beginning_ept, 6, 7))) 
+# WRONG.
+## Creating these variables separately means that these dummy month variables have DIFFERENT levels since the test set only contains september.
+
+# to fix this:-------------------------------------
+## DUMMY VARIABLE MODEL HELPERS:
+
+# add set indicator for separating
+train_energy_dummy_var <- train_energy_tsibble_gapsfilled %>% mutate(set = "train")
+test_energy_dummy_var <- test_energy_1 %>% mutate(set = "test")
+
+# Add all helper variables and combine sets to ensure factor levels are present throughout
+energyCombined <- bind_rows(train_energy_dummy_var,test_energy_dummy_var) %>% 
+  mutate(month = factor(month(datetime_beginning_ept))) %>%
+  mutate(hour = factor(hour(datetime_beginning_ept))) %>% 
+  mutate(dayOfWeek = wday(datetime_beginning_ept))
+
+
+train_energy_dummy_var <- energyCombined %>% filter(set == "train")
+
+test_energy_dummy_var <- energyCombined %>% filter(set == "test")
+
+# First combine the set, then create the helper variables, then separate the sets again. This ensure that even though the test set only has one factor level present, the variable itself is the exact same.
+#-------------------------------------------------------
+
+monthModel = train_energy_dummy_var %>% model(month=ARIMA(mw~factor(datetime_beginning_ept)+PDQ(D=0))) #ca try PDQ(D=0) or PDQ(0,0,0)
+
+report(monthModel)
+# ran 6 min 52 sec
+fabletools::forecast(monthModel$month,h=nrow(test_energy_1_month))
+
+# number of variables has to match??! now monthModel has 1, test_energy_1_month has 4
+```
+
+
+Deterministic path: Fourier transformation
+```{r}
+# the reason text book did 6 is because has S=12 and fourier has sine and cosine so 12/2=6? YES.
+# therefore, here since S=24, 24/2=12 
+
+
+# PDQ(D=0) --> search through. PDQ(0,0,0)--> 
+model_F_ARIMA <- train_energy_tsibble_gapsfilled %>% 
+  model(
+  "K = 1" = ARIMA(mw ~ fourier(K=1) + PDQ(0,0,0)), 
+  "K = 2" = ARIMA(mw ~ fourier(K=2) + PDQ(0,0,0)), 
+  "K = 3" = ARIMA(mw ~ fourier(K=3) + PDQ(0,0,0)), 
+  "K = 4" = ARIMA(mw ~ fourier(K=4) + PDQ(0,0,0)), 
+  "K = 5" = ARIMA(mw ~ fourier(K=5) + PDQ(0,0,0)), 
+  "K = 6" = ARIMA(mw ~ fourier(K=6) + PDQ(0,0,0)), 
+  "K = 7" = ARIMA(mw ~ fourier(K=7) + PDQ(0,0,0)), 
+  "K = 8" = ARIMA(mw ~ fourier(K=8) + PDQ(0,0,0)), 
+  "K = 9" = ARIMA(mw ~ fourier(K=9) + PDQ(0,0,0)), 
+  "K = 10" = ARIMA(mw ~ fourier(K=10) + PDQ(0,0,0)), 
+  "K = 11" = ARIMA(mw ~ fourier(K=11) + PDQ(0,0,0)), 
+  "K = 12" = ARIMA(mw ~ fourier(K=12) + PDQ(0,0,0))
+)
+
+
+
+glance(model_F_ARIMA)
+
+# ran for 18 minutes 24 second :( Terminated by user.
+```
+```{r}
+model_F_ARIMA_k_1 <- train_energy_tsibble_gapsfilled %>% 
+  model("K = 1" = ARIMA(mw ~ fourier(K=1) + PDQ(D = 0)))
+
+glance(model_F_ARIMA_k_1)
+```
+
+```{r}
+model_F_ARIMA_k_2 <- train_energy_tsibble_gapsfilled %>% 
+  model("K = 2" = ARIMA(mw ~ fourier(K=2) + PDQ(D = 0)))
+
+glance(model_F_ARIMA_k_2)
+```
+```{r}
+model_F_ARIMA_k_2 <- train_energy_tsibble_gapsfilled %>% 
+  model("K = 2" = ARIMA(mw ~ fourier(K=2) + PDQ(D = 0)))
+
+glance(model_F_ARIMA_k_2)
+```
+
+
+
+Deterministic path: predictor variables
+
+Stochastic path: seasonal differences.
+```{r}
+# use unit root test to test for stationarity on hourly level.
+train_energy_tsibble_gapsfilled %>% features(mw, unitroot_kpss)
+# failed to reject null hypothesis, for KPSS test, then is stationary. p value 0.01
+train_energy_tsibble_gapsfilled %>% features(mw, unitroot_ndiffs)
+# ndffis = 1 so NOT stationary, there's significant differences. --> BUT in the notes ppt1 p60: will always tell taking differences if can visually see season. Don't trust it fully.
+```
+
+```{r}
+train_energy_tsibble_gapsfilled %>% gg_tsdisplay(difference(mw, 24))
+```
+
+yearly trend but modeling in hourly.
+
+
+after knowing the suggested AR and MA and seasonal AR and MA term and S=???, now ready to modeling!!
+
+## Seasonal ARIMA
+```{r}
+# text book code, change.
+model_SARIMA <- train_energy_tsibble_gapsfilled %>% 
+  model(
+    hand = ARIMA(Passengers ~ pdq(1,0,0) + PDQ(1,1,1)),
+    auto = ARIMA(Passengers)
+  )
+```
+```{r}
+model_SARIMA %>%
+  select(hand) %>%
+  report
+```
+```{r}
+model_SARIMA %>%
+  select(hand) %>%
+  gg_tsresiduals(lag = 36)
+```
+
+
