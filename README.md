@@ -20,3 +20,5 @@ Time Series I and II:
 
 ## Resources
 [Dr. Aric LaBarr TS textbook](https://www.ariclabarr.com/time-series/part_9_season.html)
+
+[Dr.Simmons TS textbook](https://sjsimmo2.github.io/TimeSeries/)
